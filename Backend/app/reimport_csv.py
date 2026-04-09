@@ -64,13 +64,25 @@ if "datetime" in df.columns and "datetime_ts" not in df.columns:
     print("[OK] Renamed 'datetime' -> 'datetime_ts'")
 
 # --- CONVERT DATE FORMAT ---
-# CSV has DD-MM-YYYY HH:MM format, PostgreSQL needs YYYY-MM-DD HH:MM:SS
+# CSV has MIXED formats:
+#   - "2024-09-01 18:00:00" (YYYY-MM-DD, ~215K rows)
+#   - "02-09-2025 06:00"    (DD-MM-YYYY, ~21K rows)
+# We parse both and convert to ISO format for PostgreSQL
 if "datetime_ts" in df.columns:
-    df["datetime_ts"] = pd.to_datetime(df["datetime_ts"], dayfirst=True, errors="coerce")
-    # Convert to ISO format string for JSON upload
+    # Try ISO format first (YYYY-MM-DD), then DD-MM-YYYY as fallback
+    parsed_iso = pd.to_datetime(df["datetime_ts"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    parsed_dmy = pd.to_datetime(df["datetime_ts"], dayfirst=True, errors="coerce")
+
+    # Use ISO where it worked, fall back to dayfirst
+    df["datetime_ts"] = parsed_iso.fillna(parsed_dmy)
+
+    null_count = df["datetime_ts"].isna().sum()
+    valid_count = df["datetime_ts"].notna().sum()
+    print(f"[OK] Parsed {valid_count} dates ({null_count} still null)")
+
+    # Convert to string for JSON upload
     df["datetime_ts"] = df["datetime_ts"].dt.strftime("%Y-%m-%d %H:%M:%S")
     df["datetime_ts"] = df["datetime_ts"].replace("NaT", None)
-    print("[OK] Converted datetime to YYYY-MM-DD format")
 
 # --- NUMERIC CLEANUP ---
 numeric_columns = [
