@@ -278,7 +278,7 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
     try:
         # Use ilike for case-insensitive matching (critical fix!)
         resp = client.table("groundwater") \
-            .select("datetime_ts, water_level, rainfall_mm, specific_yield, aquifer_type, wq_ph, wq_ec, wq_cl, wq_f, wq_total_hardness") \
+            .select("datetime_ts, water_level, barometric, rainfall_mm, specific_yield, aquifer_type, wq_ph, wq_ec, wq_cl, wq_f, wq_total_hardness") \
             .ilike("district", f"%{district}%") \
             .ilike("block", f"%{block}%") \
             .order("datetime_ts", desc=True) \
@@ -305,11 +305,23 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
                 "error": "All rows invalid after cleaning (no datetime_ts or water_level)"
             }
 
+        # Estimate rainfall from barometric pressure drops
+        # A significant pressure drop (~1-3 mbar) over 12h indicates rain
+        if "barometric" in df.columns and df["barometric"].notna().any():
+            df = df.sort_values("datetime_ts")
+            df["pressure_drop"] = -df["barometric"].diff()  # negative diff = drop
+            # Estimate: ~1mm rain per 0.5 mbar pressure drop (simplified model)
+            df["rainfall_mm"] = df["pressure_drop"].clip(lower=0) * 2.0
+        
+        # Ensure rainfall_mm column exists
+        if "rainfall_mm" not in df.columns:
+            df["rainfall_mm"] = 0.0
+
         # Daily aggregation
         df["date"] = df["datetime_ts"].dt.date
-        daily = df.groupby("date").agg({
+        agg_dict = {
             "water_level": "mean",
-            "rainfall_mm": "mean",
+            "rainfall_mm": "sum",  # sum rainfall per day
             "specific_yield": "mean",
             "aquifer_type": "last",
             "wq_ph": "mean",
@@ -317,7 +329,10 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
             "wq_cl": "mean",
             "wq_f": "mean",
             "wq_total_hardness": "mean"
-        }).reset_index()
+        }
+        if "barometric" in df.columns:
+            agg_dict["barometric"] = "mean"
+        daily = df.groupby("date").agg(agg_dict).reset_index()
 
         daily.rename(columns={"water_level": "mean_level"}, inplace=True)
 
@@ -328,7 +343,7 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
         last_row = daily.iloc[-1].to_dict()
         last_date = str(last_row.get("date"))
         last_level = safe_round(last_row.get("mean_level"), 2)
-        rainfall_val = safe_round(last_row.get("rainfall_mm"), 2)
+        rainfall_val = safe_round(last_row.get("rainfall_mm"), 1)
         aquifer = last_row.get("aquifer_type", "Unknown")
 
         # Compute sustainability score
