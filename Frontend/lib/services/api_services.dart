@@ -9,7 +9,7 @@ class ApiService {
   // For local testing: "http://10.0.2.2:8000" (Android emulator)
   //                    "http://localhost:8000" (web/desktop)
   // ======================================================
-  static const String baseUrl = "http://10.0.2.2:8000";
+  static const String baseUrl = "https://bhu-jalam-ruby.vercel.app";
 
   // Helper: make GET request
   static Future<http.Response> _get(String url) async {
