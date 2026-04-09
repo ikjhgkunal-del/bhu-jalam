@@ -2,15 +2,35 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
+import numpy as np
+import math
 import re
 
 from app.analytics import compute_daily_fluctuation, estimate_yield, get_mean_levels_data
 from app.scoring import compute_sustainability_score
-from app.db import client, fetch_block_data
+from app.db import client
+
+
+def sanitize_for_json(obj):
+    """Recursively replace NaN/Inf floats with None so JSON serialization works."""
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    elif isinstance(obj, (np.floating, np.integer)):
+        val = float(obj)
+        if math.isnan(val) or math.isinf(val):
+            return None
+        return val
+    return obj
 
 app = FastAPI(title="Groundwater Analytics API")
 
-# ✅ Allow all origins for dev (restrict in production)
+# Allow all origins for dev (restrict in production)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -39,17 +59,19 @@ def get_districts():
             status_code=404,
             detail={"error": "No districts found", "reason": "Database returned empty result"}
         )
-    districts = sorted({row["district"].strip().title() for row in response.data if row.get("district")})
+    # Return raw district names from DB (no .title() mangling)
+    districts = sorted({row["district"].strip() for row in response.data if row.get("district")})
     return list(districts)
-
 
 
 @app.get("/blocks")
 def get_blocks(district: str = Query(...)):
+    # Use ilike to match case-insensitively
     response = client.rpc("get_blocks_by_district", {"district_name": district}).execute()
     if not response.data:
         raise HTTPException(status_code=404, detail="No blocks found for this district")
-    blocks = sorted({row["block"].strip().title() for row in response.data if row.get("block")})
+    # Return raw block names from DB (no .title() mangling)
+    blocks = sorted({row["block"].strip() for row in response.data if row.get("block")})
     return blocks
 
 
@@ -59,7 +81,7 @@ def get_district_by_block(block: str = Query(...)):
     response = (
         client.table("groundwater")
         .select("district")
-        .eq("block", block)
+        .ilike("block", f"%{block}%")
         .limit(1)
         .execute()
     )
@@ -71,7 +93,7 @@ def get_district_by_block(block: str = Query(...)):
 
 @app.get("/blocks-all")
 def get_blocks_all():
-    """Return mapping of block → district for all records."""
+    """Return mapping of block -> district for all records."""
     response = client.rpc("get_blocks_all").execute()
     if not response.data:
         raise HTTPException(status_code=404, detail="No blocks found")
@@ -95,22 +117,8 @@ def fluctuations_daily(district: str, block: str):
 @app.get("/plot-mean-levels")
 def plot_mean_levels_api(district: str, block: str, days: int = 10):
     """Return daily mean water level data points as JSON for client-side charting."""
-
-    # normalize inputs
-    def normalize(text: str) -> str:
-        if not text:
-            return ""
-        text = text.lower().strip()
-        text = re.sub(r"[_\-\s]+", " ", text)   # collapse _, - and multiple spaces
-        return text
-
-    norm_district = normalize(district)
-    norm_block = normalize(block)
-
-    print(f"🔎 Normalized request → District={norm_district}, Block={norm_block}")
-
-    # Call the JSON data function (no matplotlib)
-    data_points = get_mean_levels_data(norm_district, norm_block, days)
+    # Use ilike matching (handled inside get_mean_levels_data -> fetch_block_data)
+    data_points = get_mean_levels_data(district, block, days)
 
     if not data_points:
         raise HTTPException(
@@ -119,7 +127,6 @@ def plot_mean_levels_api(district: str, block: str, days: int = 10):
         )
 
     return {"data_points": data_points}
-
 
 
 # -------------------
@@ -133,7 +140,6 @@ def yield_endpoint(district: str, block: str, days: int = 30):
     return {"estimated_irrigated_area_ha": result}
 
 
-
 # -------------------
 # Metadata Endpoints
 # -------------------
@@ -143,8 +149,8 @@ def last_recorded(district: str = Query(...), block: str = Query(...)):
     resp = (
         client.table("groundwater")
         .select("datetime_ts")
-        .eq("district", district)
-        .eq("block", block)
+        .ilike("district", f"%{district}%")
+        .ilike("block", f"%{block}%")
         .order("datetime_ts", desc=True)
         .limit(1)
         .execute()
@@ -160,8 +166,8 @@ def last_water_level(district: str = Query(...), block: str = Query(...)):
     resp = (
         client.table("groundwater")
         .select("water_level, datetime_ts")
-        .eq("district", district)
-        .eq("block", block)
+        .ilike("district", f"%{district}%")
+        .ilike("block", f"%{block}%")
         .order("datetime_ts", desc=True)
         .limit(1)
         .execute()
@@ -177,8 +183,8 @@ def rainfall(district: str = Query(...), block: str = Query(...)):
     resp = (
         client.table("groundwater")
         .select("rainfall_mm, datetime_ts")
-        .eq("district", district)
-        .eq("block", block)
+        .ilike("district", f"%{district}%")
+        .ilike("block", f"%{block}%")
         .order("datetime_ts", desc=True)
         .limit(1)
         .execute()
@@ -194,8 +200,8 @@ def get_aquifer_type(district: str = Query(...), block: str = Query(...)):
     resp = (
         client.table("groundwater")
         .select("aquifer_type")
-        .eq("district", district)
-        .eq("block", block)
+        .ilike("district", f"%{district}%")
+        .ilike("block", f"%{block}%")
         .order("datetime_ts", desc=True)
         .limit(1)
         .execute()
@@ -247,16 +253,14 @@ def get_sustainability_score(district: str = Query(...), block: str = Query(...)
 
         score = compute_sustainability_score(daily.tail(30))
 
-        return {
+        return sanitize_for_json({
             "district": district,
             "block": block,
             "final_score_pct": score.get("final_score_pct"),
             "components": {k: v for k, v in score.items() if k != "final_score_pct"}
-        }
+        })
     except Exception as e:
         return {"error": f"Score computation failed: {str(e)}"}
-
-
 
 
 # -------------------
@@ -272,11 +276,11 @@ def safe_round(value, digits=2):
 @app.get("/extras")
 def get_extras(district: str = Query(...), block: str = Query(...)):
     try:
-        # 🔹 Fetch raw data from Supabase
+        # Use ilike for case-insensitive matching (critical fix!)
         resp = client.table("groundwater") \
             .select("datetime_ts, water_level, rainfall_mm, specific_yield, aquifer_type, wq_ph, wq_ec, wq_cl, wq_f, wq_total_hardness") \
-            .eq("district", district) \
-            .eq("block", block) \
+            .ilike("district", f"%{district}%") \
+            .ilike("block", f"%{block}%") \
             .order("datetime_ts", desc=True) \
             .limit(500) \
             .execute()
@@ -287,7 +291,7 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
                 "error": f"No groundwater data found for district={district}, block={block}"
             }
 
-        # 🔹 Convert to DataFrame
+        # Convert to DataFrame
         df = pd.DataFrame(rows)
         if df.empty:
             return {
@@ -301,7 +305,7 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
                 "error": "All rows invalid after cleaning (no datetime_ts or water_level)"
             }
 
-        # 🔹 Daily aggregation
+        # Daily aggregation
         df["date"] = df["datetime_ts"].dt.date
         daily = df.groupby("date").agg({
             "water_level": "mean",
@@ -320,14 +324,14 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
         if daily.empty:
             return {"error": "Not enough aggregated daily data"}
 
-        # 🔹 Safely extract last record
+        # Safely extract last record
         last_row = daily.iloc[-1].to_dict()
         last_date = str(last_row.get("date"))
         last_level = safe_round(last_row.get("mean_level"), 2)
-        rainfall = safe_round(last_row.get("rainfall_mm"), 2)
+        rainfall_val = safe_round(last_row.get("rainfall_mm"), 2)
         aquifer = last_row.get("aquifer_type", "Unknown")
 
-        # 🔹 Compute sustainability score
+        # Compute sustainability score
         try:
             score = compute_sustainability_score(daily.tail(60))
             final_score = score.get("final_score_pct", None)
@@ -335,12 +339,12 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
             final_score = None
             score = {"error": f"Scoring failed: {str(e)}"}
 
-        # 🔹 Daily fluctuation (last 2 days)
+        # Daily fluctuation (last 2 days)
         fluctuation = None
         if len(daily) >= 2:
             fluctuation = safe_round(daily["mean_level"].iloc[-1] - daily["mean_level"].iloc[-2], 2)
 
-        # 🔹 Yield estimation (if specific_yield exists)
+        # Yield estimation (if specific_yield exists)
         yield_info = None
         if "specific_yield" in daily and daily["specific_yield"].notna().any():
             try:
@@ -356,7 +360,7 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
             except Exception as e:
                 yield_info = {"error": f"Yield calc failed: {str(e)}"}
 
-        # 🔹 Water Quality
+        # Water Quality
         wq = {
             "pH": safe_round(last_row.get("wq_ph"), 2),
             "EC": safe_round(last_row.get("wq_ec"), 2),
@@ -365,24 +369,19 @@ def get_extras(district: str = Query(...), block: str = Query(...)):
             "Hardness": safe_round(last_row.get("wq_total_hardness"), 2),
         }
 
-        return {
+        return sanitize_for_json({
             "district": district,
             "block": block,
             "last_date": last_date,
             "last_water_level": last_level,
-            "rainfall_mm": rainfall,
+            "rainfall_mm": rainfall_val,
             "aquifer_type": aquifer,
             "final_score_pct": final_score,
             "score_components": score,
             "daily_fluctuation": fluctuation,
             "yield": yield_info,
             "water_quality": wq,
-            "debug": {
-                "rows_fetched": len(rows),
-                "daily_rows": len(daily),
-                "last_row": last_row,
-            }
-        }
+        })
 
     except Exception as e:
         return {
