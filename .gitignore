@@ -1,0 +1,29 @@
+# Flutter
+Frontend/build/
+Frontend/.dart_tool/
+Frontend/.flutter-plugins
+Frontend/.flutter-plugins-dependencies
+Frontend/.packages
+
+# Python
+Backend/__pycache__/
+Backend/app/__pycache__/
+Backend/venv/
+*.pyc
+*.pyo
+
+# Environment
+Backend/.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

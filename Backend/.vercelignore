@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+all_groundwater.csv
+data/
+.dockerignore
+Dockerfile
+railway.json
+test_api.py
+tempCodeRunnerFile.py
